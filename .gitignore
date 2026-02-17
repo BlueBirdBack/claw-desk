@@ -6,3 +6,11 @@ dist/
 .env.local
 .next/
 coverage/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/

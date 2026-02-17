@@ -1,5 +1,9 @@
 /**
  * Core type definitions for ClawDesk multi-tenancy.
+ *
+ * Architecture: ClawDesk is a control plane that wraps OpenClaw's native
+ * multi-agent system. Each tenant maps to an OpenClaw agent entry.
+ * No Docker, no separate processes — just config management + API routing.
  */
 
 // ─── Tenant ──────────────────────────────────────────────
@@ -11,6 +15,8 @@ export interface Tenant {
   status: TenantStatus;
   config: TenantConfig;
   billing: TenantBilling;
+  /** The OpenClaw agent ID this tenant maps to */
+  openclawAgentId: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -24,17 +30,17 @@ export interface TenantConfig {
   confidenceThreshold: number;
   /** Knowledge base ID (Azure AI Search index) */
   knowledgeBaseId?: string;
+  /** System prompt for the tenant's AI agent */
+  systemPrompt?: string;
   /** After-hours autonomy: raise threshold when no supervisors online */
   afterHoursThreshold?: number;
 }
 
 export interface ModelRoutingConfig {
-  /** Model for simple text queries (fast, cheap) */
-  text: string;
-  /** Model for image/multimodal inputs */
-  vision: string;
-  /** Model for complex reasoning */
-  reasoning: string;
+  /** Primary model for the tenant (provider/model format) */
+  primary: string;
+  /** Fallback models */
+  fallbacks?: string[];
   /** Sentiment score below which to escalate to human */
   escalationSentiment: number;
 }
@@ -55,20 +61,42 @@ export interface UsageMetrics {
   knowledgeBaseQueries: number;
 }
 
-// ─── Instance ────────────────────────────────────────────
+// ─── OpenClaw Agent Mapping ──────────────────────────────
 
-export interface TenantInstance {
+/**
+ * Maps a ClawDesk tenant to an OpenClaw agent config entry.
+ * This is the bridge between our tenancy model and OpenClaw's native system.
+ */
+export interface OpenClawAgentMapping {
+  /** ClawDesk tenant ID */
   tenantId: string;
-  containerId?: string;
-  endpoint?: string;
-  status: InstanceStatus;
-  lastActiveAt?: Date;
-  pausedAt?: Date;
-  /** Stored replica count before pause (for resume) */
-  replicasBefore?: number;
+  /** OpenClaw agent ID (e.g., "tenant-acme") */
+  agentId: string;
+  /** OpenClaw workspace path for this tenant */
+  workspacePath: string;
+  /** OpenClaw agent config fragment (what goes into agents.list[]) */
+  agentConfig: OpenClawAgentConfig;
 }
 
-export type InstanceStatus = 'creating' | 'running' | 'pausing' | 'paused' | 'resuming' | 'destroying' | 'destroyed';
+/**
+ * OpenClaw agent config — mirrors the shape of agents.list[] entries.
+ * We generate this from TenantConfig when provisioning.
+ */
+export interface OpenClawAgentConfig {
+  id: string;
+  name?: string;
+  workspace?: string;
+  model?: string | { primary?: string; fallbacks?: string[] };
+  skills?: string[];
+  sandbox?: {
+    mode?: 'off' | 'non-main' | 'all';
+    workspaceAccess?: 'none' | 'ro' | 'rw';
+  };
+  identity?: {
+    name?: string;
+    avatar?: string;
+  };
+}
 
 // ─── Bootstrapper ────────────────────────────────────────
 
@@ -112,16 +140,94 @@ export interface RequestContext {
   claims?: Record<string, unknown>;
 }
 
-// ─── Conversation ────────────────────────────────────────
+// ─── OpenClaw Gateway Client ─────────────────────────────
+
+/**
+ * Interface for communicating with an OpenClaw gateway instance.
+ * The control plane uses this to manage agents and route messages.
+ */
+export interface OpenClawGatewayClient {
+  /**
+   * Get current gateway config.
+   * Maps to: config.get WS method
+   */
+  getConfig(): Promise<OpenClawConfigSnapshot>;
+
+  /**
+   * Patch gateway config (e.g., add/remove agent).
+   * Maps to: config.patch WS method
+   * Triggers config reload (hot for agent changes).
+   */
+  patchConfig(patch: Record<string, unknown>, baseHash: string): Promise<void>;
+
+  /**
+   * Send a message into a specific session.
+   * Maps to: chat.send WS method
+   */
+  chatSend(params: ChatSendParams): Promise<ChatSendResult>;
+
+  /**
+   * Get conversation history for a session.
+   * Maps to: chat.history WS method
+   */
+  chatHistory(sessionKey: string, limit?: number): Promise<ChatMessage[]>;
+
+  /**
+   * List active sessions.
+   * Maps to: sessions.list WS method
+   */
+  sessionsList(params?: SessionsListParams): Promise<SessionEntry[]>;
+}
+
+export interface OpenClawConfigSnapshot {
+  config: Record<string, unknown>;
+  hash: string;
+}
+
+export interface ChatSendParams {
+  sessionKey: string;
+  message: string;
+  agentId?: string;
+  attachments?: Array<{ type: string; url: string }>;
+}
+
+export interface ChatSendResult {
+  ok: boolean;
+  messageId?: string;
+  response?: string;
+}
+
+export interface ChatMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  timestamp?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SessionsListParams {
+  agentId?: string;
+  activeMinutes?: number;
+  limit?: number;
+}
+
+export interface SessionEntry {
+  key: string;
+  agentId: string;
+  lastActivity?: string;
+  messageCount?: number;
+}
+
+// ─── Conversation (ClawDesk layer) ───────────────────────
 
 export interface Conversation {
   id: string;
   tenantId: string;
   customerId: string;
+  /** The OpenClaw session key for this conversation */
+  openclawSessionKey: string;
   status: ConversationStatus;
   assignedTo: 'ai' | 'human';
   confidence: number;
-  messages: ConversationMessage[];
   startedAt: Date;
   lastMessageAt: Date;
 }
@@ -138,4 +244,36 @@ export interface ConversationMessage {
     confidence?: number;
     tokensUsed?: number;
   };
+}
+
+// ─── Tenant Provisioning ─────────────────────────────────
+
+/**
+ * What happens when a tenant is created:
+ * 1. Generate OpenClaw agent ID from tenant slug
+ * 2. Build agent config from tenant config
+ * 3. Create workspace directory with SOUL.md, AGENTS.md etc.
+ * 4. Patch OpenClaw config to add agent to agents.list[]
+ * 5. OpenClaw hot-reloads, agent becomes available
+ * 6. Set up channel binding if needed
+ */
+export interface TenantProvisioningResult {
+  tenantId: string;
+  agentId: string;
+  workspacePath: string;
+  status: 'success' | 'failed';
+  error?: string;
+}
+
+/**
+ * What happens when a tenant is deleted:
+ * 1. Remove agent from OpenClaw config via config.patch
+ * 2. Archive workspace directory
+ * 3. Clean up session data
+ * 4. Remove channel bindings
+ */
+export interface TenantDeprovisioningResult {
+  tenantId: string;
+  status: 'success' | 'failed';
+  error?: string;
 }

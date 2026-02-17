@@ -1,7 +1,2 @@
-export { TenancyContext } from './context';
-export {
-  TenantResolverChain,
-  HeaderTenantResolver,
-  SubdomainTenantResolver,
-  JwtClaimTenantResolver,
-} from './resolver';
+export { TenancyContext } from './context.js';
+export { TenantResolverChain, HeaderTenantResolver, SubdomainTenantResolver, JwtClaimTenantResolver } from './resolver.js';

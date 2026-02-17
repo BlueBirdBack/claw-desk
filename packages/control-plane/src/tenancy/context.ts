@@ -36,12 +36,10 @@ export class TenancyContext {
 
   /** Initialize tenancy for the given tenant. */
   async initialize(tenant: Tenant): Promise<void> {
-    // If already initialized for this tenant, no-op
     if (this._initialized && this._tenant?.id === tenant.id) {
       return;
     }
 
-    // If initialized for a different tenant, end first
     if (this._initialized) {
       await this.end();
     }
@@ -49,13 +47,11 @@ export class TenancyContext {
     this._tenant = tenant;
     this._initializedBootstrappers = [];
 
-    // Run bootstrappers in order. If one fails, revert all previously initialized.
     for (const bootstrapper of this._bootstrappers) {
       try {
         await bootstrapper.bootstrap(tenant);
         this._initializedBootstrappers.push(bootstrapper);
       } catch (error) {
-        // Revert in reverse order
         await this._revertInitialized();
         this._tenant = null;
         this._initialized = false;
@@ -81,9 +77,6 @@ export class TenancyContext {
 
   /**
    * Run a callback in a tenant's context. Atomic — always reverts.
-   *
-   * If the callback throws, the context is still reverted before re-throwing.
-   * If a previous tenant context existed, it is restored after the callback.
    */
   async run<T>(tenant: Tenant, callback: (tenant: Tenant) => Promise<T>): Promise<T> {
     const previousTenant = this._tenant;
@@ -149,7 +142,6 @@ export class TenancyContext {
       try {
         await bootstrapper.revert();
       } catch (error) {
-        // Log but don't throw — we need to revert all bootstrappers
         console.error(`Failed to revert bootstrapper "${bootstrapper.name}":`, error);
       }
     }

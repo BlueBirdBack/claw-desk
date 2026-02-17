@@ -10,11 +10,10 @@ function makeTenant(overrides: Partial<Tenant> = {}): Tenant {
     name: 'Acme Corp',
     slug: 'acme',
     status: 'active',
+    openclawAgentId: 'tenant-acme',
     config: {
       modelRouting: {
-        text: 'gpt-5.3-spark',
-        vision: 'gpt-5.3-vision',
-        reasoning: 'claude-opus-4.6',
+        primary: 'azure/gpt-4o',
         escalationSentiment: -0.5,
       },
       confidenceThreshold: 0.7,
@@ -102,7 +101,7 @@ describe('TenancyContext', () => {
       ]);
 
       await ctx.initialize(makeTenant());
-      log.length = 0; // Clear init logs
+      log.length = 0;
 
       await ctx.end();
 
@@ -126,7 +125,7 @@ describe('TenancyContext', () => {
         makeBootstrapper('A', log),
         makeBootstrapper('B', log),
         makeFailingBootstrapper('C', log),
-        makeBootstrapper('D', log), // Should never run
+        makeBootstrapper('D', log),
       ]);
 
       await expect(ctx.initialize(makeTenant())).rejects.toThrow('C failed');
@@ -141,8 +140,8 @@ describe('TenancyContext', () => {
       const ctx = new TenancyContext([
         makeBootstrapper('A', log),
         makeFailingBootstrapper('B', log),
-        makeBootstrapper('C', log), // Never reached
-        bootstrapperD,              // Never reached
+        makeBootstrapper('C', log),
+        bootstrapperD,
       ]);
 
       await expect(ctx.initialize(makeTenant())).rejects.toThrow('B failed');
@@ -193,7 +192,6 @@ describe('TenancyContext', () => {
         expect(ctx.tenant?.id).toBe('tenant-b');
       });
 
-      // Should be back to tenant A
       expect(ctx.tenant?.id).toBe('tenant-a');
       expect(ctx.initialized).toBe(true);
     });
